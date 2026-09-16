@@ -56,7 +56,62 @@ run_rank_determination_nmf <- function(data, assay,...){
   return(nmf_mod)
 }
 
-project_factors <- function(source, target, assay, nmf_model){
+#' Project a target dataset onto the source NMF factors.
+#'
+#' The projected weights are returned on the same scale as the source factors
+#' `t(nmf_model$h)`, so that a model fitted on the source can be applied to them.
+#'
+#' `singlet` factorises the source as `A ~ w %*% diag(d) %*% h` with the rows of
+#' `h` summing to 1, so `d` carries the per-factor scale. `RcppML::project()`
+#' solves `A_target ~ w %*% h_new`, meaning `h_new` absorbs that scale and must
+#' be divided by a per-factor quantity to return it to the `h` scale.
+#'
+#' Which quantity is appropriate depends on how much of the source's gene space
+#' the target actually measures:
+#'
+#' \itemize{
+#'   \item When the target shares most of the source's genes, the source `d` is
+#'     a good estimate of the target's per-factor scale and is used directly.
+#'   \item When the target measures only a small panel, the source `d` no longer
+#'     describes the target: on a 266-gene Xenium panel against a 28,916-gene
+#'     Visium factorisation, `cor(log(d_source), log(d_target))` is about 0.2
+#'     with per-factor ratios spanning several hundred fold, against about 0.66
+#'     and roughly ten fold for a Visium target. In that regime the scale is
+#'     estimated from the target itself as `rowSums(h_new)`, the same quantity
+#'     `d` measures on the source.
+#' }
+#'
+#' @param source A SingleCellExperiment or SpatialExperiment used to fit `nmf_model`.
+#' @param target The object to project.
+#' @param assay Assay to project.
+#' @param nmf_model An NMF model from `singlet` (components `w`, `d`, `h`).
+#' @param d_scale Optional length-k vector of per-factor scales to divide by. When
+#'   supplied it overrides the rule above. `transfer_labels()` uses this to pool
+#'   the target-side estimate across several targets, which matches how `d` is
+#'   defined on the source (over the whole dataset, not one section).
+#' @param overlap_threshold Fraction of the source's genes that the target must
+#'   measure for the source `d` to be used. Defaults to 0.5.
+#'
+#' @return A cells x factors matrix on the source factor scale.
+project_factors <- function(source, target, assay, nmf_model,
+                            d_scale = NULL, overlap_threshold = 0.5){
+  pr <- project_raw(source, target, assay, nmf_model)
+  d_use <- if (!is.null(d_scale)) d_scale else
+    target_factor_scale(pr$proj, nmf_model, pr$n_shared, overlap_threshold)
+  factors <- t(pr$proj / d_use)
+  colnames(factors) <- paste0("NMF", 1:ncol(factors))
+  factors
+}
+
+#' Project a target onto the source loadings without rescaling.
+#'
+#' Returns the raw `k x n` output of `RcppML::project` together with the number
+#' of genes shared with the source, so that a caller can choose the per-factor
+#' scale itself (for example by pooling across several targets).
+#'
+#' @inheritParams project_factors
+#' @return A list with `proj` (k x n) and `n_shared`.
+project_raw <- function(source, target, assay, nmf_model){
   if(is(target, "SpatialExperiment")){
     if (!(assay %in% assayNames(source))){
       stop(sprintf("Assay %s not found in the source dataset. %s needs to be available in both the source and target datasets.", assay, assay))
@@ -99,9 +154,41 @@ project_factors <- function(source, target, assay, nmf_model){
   options(RcppML.threads = 0) #line below doesn't work otherwise
   proj<-RcppML::project(data=as.matrix(A), w=loadings, threads=0, L1=0, mask=NULL)
 
-  #print(head(proj))
-  factors <- t(proj)/nmf_model$d #scale by the constant factor
-  colnames(factors) <- paste0("NMF", 1:ncol(factors))
+  # proj is k x n, factors in ROWS. Any rescaling by a length-k vector must be
+  # applied here, before the transpose: t(proj)/d divides an n x k matrix by a
+  # length-k vector, which recycles down columns and gives all but 1 in k
+  # entries the wrong divisor.
+  list(proj = proj, n_shared = length(i))
+}
 
-  return(factors)
+#' Per-factor scale to return a projection to the source factor scale.
+#'
+#' Returns the source `d` when the target measures at least `overlap_threshold`
+#' of the source's genes, and the target's own `rowSums(h_new)` otherwise. See
+#' [project_factors()] for why the two regimes differ.
+#'
+#' @param proj A k x n projection from `RcppML::project`.
+#' @param nmf_model The source NMF model.
+#' @param n_shared Number of genes shared between source and target.
+#' @param overlap_threshold Fraction of source genes the target must measure.
+#' @param pooled_d_target Optional pre-pooled `rowSums(h_new)` summed over several
+#'   targets, used instead of deriving it from a single `proj`.
+#'
+#' @return A length-k vector of per-factor scales.
+target_factor_scale <- function(proj, nmf_model, n_shared, overlap_threshold = 0.5,
+                                pooled_d_target = NULL){
+  overlap <- n_shared / nrow(nmf_model$w)
+  if (overlap >= overlap_threshold) {
+    return(nmf_model$d)
+  }
+  d_target <- if (!is.null(pooled_d_target)) pooled_d_target else rowSums(proj)
+  # A factor with essentially no support on the target panel would otherwise be
+  # divided by ~0 and blown up; fall back to the source d for those.
+  tiny <- d_target < 0.01 * stats::median(d_target)
+  if (any(tiny)) {
+    warning(sprintf("%d factor(s) have almost no mass in the target; using the source d for them.",
+                    sum(tiny)), immediate. = TRUE)
+    d_target[tiny] <- nmf_model$d[tiny]
+  }
+  d_target
 }
