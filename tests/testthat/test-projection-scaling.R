@@ -13,10 +13,15 @@ mk_spe <- function(genes, ncell, seed) {
   spe
 }
 
-mk_nmf <- function(ngene, k, seed = 1) {
+mk_nmf <- function(ngene, k, nspot = 60, seed = 1) {
   set.seed(seed)
   w <- matrix(abs(rnorm(ngene * k)), ngene, k)
-  list(w = sweep(w, 2, colSums(w), "/"), d = 10 * 2^seq_len(k), h = NULL)
+  # h is k x n_spots with rows summing to 1, as singlet returns it. The scale
+  # estimated from a small-panel target is expressed per source spot, so
+  # ncol(h) is needed and h can no longer be NULL.
+  h <- matrix(abs(rnorm(k * nspot)), k, nspot)
+  list(w = sweep(w, 2, colSums(w), "/"), d = 10 * 2^seq_len(k),
+       h = sweep(h, 1, rowSums(h), "/"))
 }
 
 genes <- paste0("g", 1:400)
@@ -53,11 +58,26 @@ test_that("factors with no mass in the target fall back to the source d", {
   proj[2, ] <- 0                              # factor 2 absent from the target
   expect_warning(sc <- target_factor_scale(proj, nmf, n_shared = 40))
   expect_equal(sc[2], nmf$d[2])
-  expect_equal(sc[-2], rowSums(proj)[-2])
+  expect_equal(sc[-2], (rowMeans(proj) * ncol(nmf$h))[-2])
 })
 
 test_that("a supplied pooled scale overrides the per-target estimate", {
   proj   <- matrix(runif(k * 20), k, 20)
   pooled <- rowSums(proj) * 7
   expect_equal(target_factor_scale(proj, nmf, 40, pooled_d_target = pooled), pooled)
+})
+
+test_that("the target-estimated scale does not depend on the number of cells", {
+  # The reason for using the mean rather than the total: doubling the cells in a
+  # section must not change the scale, or the predictions depend on section size.
+  proj  <- matrix(runif(k * 20), k, 20)
+  twice <- cbind(proj, proj)                  # same section, sampled twice over
+  expect_equal(target_factor_scale(proj,  nmf, n_shared = 40),
+               target_factor_scale(twice, nmf, n_shared = 40))
+})
+
+test_that("a high-overlap target still uses the source d unchanged", {
+  # Visium -> Visium needs no size correction; that arm must be untouched.
+  proj <- matrix(runif(k * 20), k, 20)
+  expect_equal(target_factor_scale(proj, nmf, n_shared = nrow(nmf$w)), nmf$d)
 })

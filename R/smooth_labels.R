@@ -27,10 +27,14 @@ smoother <-
     # but has been adapted to handle different cutoffs for each level in the labels
     ############################################################################
 
-    # Set the proportions to be 0.5 for each class if the user did not specify
+    # Set the proportions to be 0.5 for each class if the user did not specify.
+    # Name the entries by the label values themselves: `names(unique(x))` is NULL
+    # for an unnamed vector, which left `props` unnamed and forced the lookup
+    # below to fall back to positional indexing.
     if (is.null(props)){
-      props <- rep(0.5, length(unique(labels_curr)))
-      names(props) <- names(unique(labels_curr))
+      levels_present <- sort(unique(labels_curr))
+      props <- rep(0.5, length(levels_present))
+      names(props) <- as.character(levels_present)
     }
 
     # Get neighbors
@@ -56,7 +60,17 @@ smoother <-
           length(neighbor_labels)
 
         cell_type_i <- labels_curr[[i]]
-        prop_thres <- props[cell_type_i]
+        # Look the threshold up by label rather than by position. Label values
+        # need not be 1..n -- transferring cluster numbers can leave a gap, e.g.
+        # clusters 1,2,4..9 with 3 absent. Positional indexing then returns NA
+        # for every label above the number of distinct labels present, and the
+        # `any()` comparison below errors with "missing value where TRUE/FALSE
+        # needed". Unnamed `props` keeps the old positional behaviour.
+        prop_thres <- if (is.null(names(props))) {
+          props[[cell_type_i]]
+        } else {
+          props[[as.character(cell_type_i)]]
+        }
         # Change label based on condition
         if (any(neighbor_props > prop_thres)) {
           labels_update[i] <- as.numeric(

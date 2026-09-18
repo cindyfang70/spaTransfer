@@ -18,23 +18,24 @@ transfer_labels.list <- function(targets, source, assay="logcounts", annotations
   factors_use_names <- source_outputs$factors_use_names
   multinom_mod <- source_outputs$multinom
 
-  # 4: project patterns onto the target datasets.
-  # The projection is done first for every target so that, when the targets
-  # measure only a small part of the source's gene space, the per-factor scale
-  # can be pooled across them. `d` is defined on the source over the whole
-  # dataset rather than one section, so the target-side estimate is pooled the
-  # same way; estimating it per section would force every section to the same
-  # total factor usage and erase real differences in composition between them.
-  raws <- lapply(targets, function(tg) project_raw(source, tg, assay, source_nmf_mod))
-  pooled <- Reduce(`+`, lapply(raws, function(r) rowSums(r$proj)))
-  d_scale <- target_factor_scale(
-    proj = NULL, nmf_model = source_nmf_mod, n_shared = raws[[1]]$n_shared,
-    overlap_threshold = 0.5, pooled_d_target = pooled)
-
+  # 4: project patterns onto the target datasets, scaling each target by a
+  # per-factor scale estimated from that target alone.
+  #
+  # An earlier version pooled the target-side estimate across all targets, on
+  # the grounds that `d` is defined on the source over the whole dataset rather
+  # than one section. That divides every target by the summed mass of all of
+  # them, which puts the projections roughly n_targets-fold below the scale of
+  # the source factors `t(h)` that the multinomial model was fitted on. Since
+  # the model predicts argmax(intercept + x %*% beta), shrinking x that way lets
+  # the intercepts dominate and the predictions collapse onto the most abundant
+  # labels: on a 266-gene Xenium panel the pooled scale drove six DLPFC sections
+  # to ~50-80% white matter with L3, L4 and Meninges at zero, and on a
+  # 5011-gene panel it drove four hippocampus sections to a single domain.
+  # Estimating the scale per target keeps the projections at a comparable
+  # magnitude to the source factors and preserves the laminar structure.
   for (i in 1:length(targets)){
     target <- targets[[i]]
-    projections <- t(raws[[i]]$proj / d_scale)
-    colnames(projections) <- paste0("NMF", 1:ncol(projections))
+    projections <- project_factors(source, target, assay, source_nmf_mod)
     reducedDim(target, "nmf_projections") <- projections
     #projections <- projections[,factors_use_names]
 
