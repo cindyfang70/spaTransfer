@@ -77,8 +77,10 @@ run_rank_determination_nmf <- function(data, assay,...){
 #'     Visium factorisation, `cor(log(d_source), log(d_target))` is about 0.2
 #'     with per-factor ratios spanning several hundred fold, against about 0.66
 #'     and roughly ten fold for a Visium target. In that regime the scale is
-#'     estimated from the target itself as `rowSums(h_new)`, the same quantity
-#'     `d` measures on the source.
+#'     estimated from the target itself as `rowMeans(h_new) * n_spots`, which is
+#'     what `d` measures on the source expressed as a mean per observation. The
+#'     mean matters: a total would make the scale depend on the number of cells
+#'     in the section, which collapses the predictions for large sections.
 #' }
 #'
 #' @param source A SingleCellExperiment or SpatialExperiment used to fit `nmf_model`.
@@ -86,9 +88,10 @@ run_rank_determination_nmf <- function(data, assay,...){
 #' @param assay Assay to project.
 #' @param nmf_model An NMF model from `singlet` (components `w`, `d`, `h`).
 #' @param d_scale Optional length-k vector of per-factor scales to divide by. When
-#'   supplied it overrides the rule above. `transfer_labels()` uses this to pool
-#'   the target-side estimate across several targets, which matches how `d` is
-#'   defined on the source (over the whole dataset, not one section).
+#'   supplied it overrides the rule above. `transfer_labels()` does not set it:
+#'   pooling the target-side estimate across targets shrinks the projections
+#'   below the scale of the source factors the model was fitted on, which
+#'   collapses the predictions (see the note in `transfer_labels.list`).
 #' @param overlap_threshold Fraction of the source's genes that the target must
 #'   measure for the source `d` to be used. Defaults to 0.5.
 #'
@@ -164,8 +167,10 @@ project_raw <- function(source, target, assay, nmf_model){
 #' Per-factor scale to return a projection to the source factor scale.
 #'
 #' Returns the source `d` when the target measures at least `overlap_threshold`
-#' of the source's genes, and the target's own `rowSums(h_new)` otherwise. See
-#' [project_factors()] for why the two regimes differ.
+#' of the source's genes, and otherwise a scale estimated from the target as
+#' `rowMeans(h_new) * n_spots`, which puts the target's mean weight per cell on
+#' the source's mean weight per spot. See [project_factors()] for why the two
+#' regimes differ, and why the mean rather than the total is used.
 #'
 #' @param proj A k x n projection from `RcppML::project`.
 #' @param nmf_model The source NMF model.
@@ -181,7 +186,18 @@ target_factor_scale <- function(proj, nmf_model, n_shared, overlap_threshold = 0
   if (overlap >= overlap_threshold) {
     return(nmf_model$d)
   }
-  d_target <- if (!is.null(pooled_d_target)) pooled_d_target else rowSums(proj)
+  # Normalise the MEAN weight per cell, not the TOTAL over the target.
+  #
+  # `rowSums(proj)` sets each factor's total mass over the target to 1, so every
+  # cell gets ~1/n_cells and the scale depends on how many cells the section has.
+  # The source factors `t(h)` the model was fitted on average 1/n_spots per spot,
+  # so a target with more cells than the source has spots lands below the scale
+  # the model expects, the intercepts dominate, and the predictions collapse onto
+  # the most abundant labels. Using the mean removes n_cells from the expression
+  # (rowMeans * n_spots == rowSums * n_spots / n_cells), giving a target scale
+  # that does not depend on section size.
+  d_target <- if (!is.null(pooled_d_target)) pooled_d_target else
+    rowMeans(proj) * ncol(nmf_model$h)
   # A factor with essentially no support on the target panel would otherwise be
   # divided by ~0 and blown up; fall back to the source d for those.
   tiny <- d_target < 0.01 * stats::median(d_target)
